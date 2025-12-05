@@ -1,6 +1,6 @@
 Hello, 
 
-Welcome to our very cool, very awesome **immunity/infection** dataset. Here, we look at 8 lakes every month over the course of a year. We sample the "super"model, the threespine stickleback, looking for the presence and intensity of infection by the trophically transmitted tapeworm, *Schistocephalus solidus*. Paired with looking into infection dynamics in natural populations we also are able to get a pulse of immune dynamics within these same hosts by the extent of fibrosis present in the peritoneal cavity of fish. How cool is that!
+Welcome to our very cool, very awesome **immunity/infection** dataset. Here, we look at 8 lakes every month over the course of a year. We sample the "super"model (credit to Jesse Weber who said this and I found it hilarious), the threespine stickleback, looking for the presence and intensity of infection by the trophically transmitted tapeworm, *Schistocephalus solidus*. Paired with looking into infection dynamics in natural populations we also are able to get a pulse of immune dynamics within these same hosts by the extent of fibrosis present in the peritoneal cavity of fish. How cool is that!
 
 This look a lot of time to wrangle and code, so I am very happy for everyone to look through everything and provide feedback and insight. Thank you for your light and support! 
 
