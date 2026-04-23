@@ -48,3 +48,18 @@ Shine bright like a tapeworm. Hugz, C.
 | ln_wormweight | numeric | Numeric | Natural log of total_worm_wt | — |
 | max_worm_wt | grams | Numeric | Mass of the largest tapeworm per fish | — |
 | wormbiomass_fishmass | Ratio [0–1] | Numeric | P:H ratio calculated as total_worm_wt / Mass | — |
+
+
+## Worm weight data sheet
+### Variable Definitions
+
+| Variable | Unit | Type | Description | Notes |
+|---------|------|------|-------------|-------|
+| Date Weighted | Date | D-M-Y | Date on which tapeworms in fish were weighed | Individual worm weights not for baby fish |
+|Year | Number | | 2023 or 2024 | — |
+| Month_Num | Date | Numeric (1-13) | Numeric version of months starting in July 2023 (1) to July 2024 (13) | — |
+| Initials | --| -- | Person who dissected and weighed worms | — |
+| Lake | — | Factor (8 levels) | Lake identity for monthly survey | SUG, PCH, SRA, L2B, BEW, FRE, RSS, BLA |
+| N_worms_dissected | count | Integer| Number of worms dissected from fish | — |
+| N_worms_weighed | count | Integer| Number of worms weighed from fish | — |
+| worm_wt_[1..xx]| Numeric | grams| Mass of individiual worm (the _# represents the weight of worm 1, worm2, and so on) | — |
