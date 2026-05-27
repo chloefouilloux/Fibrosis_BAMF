@@ -1,0 +1,1507 @@
+---
+title: "Fibrosis_Apr2026"
+author: "Chloe Allison Fouilloux"
+date: "2026-03-31"
+output: html_document
+---
+
+Hello, 
+
+Welcome to our very cool, very awesome **immunity/infection** dataset. Here, we look at 8 lakes every month over the course of a year. We sample the "super"model, the threespine stickleback, looking for the presence and intensity of infection by the trophically transmitted tapeworm, *Schistocephalus solidus*. Paired with looking into infection dynamics in natural populations we also are able to get a pulse of immune dynamics within these same hosts by the extent of fibrosis present in the peritoneal cavity of fish. How cool is that!
+
+This look a lot of time to wrangle and code, so I am very happy for everyone to look through everything and provide feedback and insight. Thank you for your light and support! 
+
+Shine bright like a tapeworm. Hugz, C.
+
+- Tetative Manuscript Title: *Immuno-genetic variation and host ontogeny constrain pathogen virulence and transmission in a helminth parasite*
+
+- Authors: Chloe A. Fouilloux1*, Heather Alexander2, Grace Vaziri2, Patrick McNamara2, Emma Polard2, Amanda Hund3, Edith Reyes Contreras3, Penelope Steffen3, Cate Patterson3, Shira Dubin3, Amy Chen3, Gwen Casey3, John Berini III3, Emma Choi4, Noelle Plantier4, Dina Soklovskaya4,  Daniel I. Bolnick4, Jessica L. Hite1
+
+```{r Load Libraries}
+
+library(tidyverse)
+library(tidyr)
+library(dplyr)
+library(ggplot2)
+library(forcats)
+library(gghighlight)
+library(ggpubr)
+library(lubridate)
+library(ggridges)
+library(mclust)
+library(purrr)
+library(mgcv)
+library(cluster)
+library(DHARMa)
+library(brms)
+library(boot)
+library(scam)
+
+library(spdep)
+library(sjPlot)
+
+library(tidybayes)
+library(bayesplot)
+
+```
+
+Set theme for ggplot
+
+```{r Themes}
+#Theme set
+theme_set(  theme(
+                  strip.background = element_rect(fill = "White"),
+                  panel.background = element_rect(fill = "white",
+                                                  colour = "black"), 
+                  panel.grid.major = element_blank(), 
+                  panel.grid.minor = element_blank(), 
+                  text = element_text(size = 15)))
+```
+
+```{r Loading Data}
+
+#These are little fish analyzed at UConn. These little guys are important for cohort analysis and infection prev!
+baby_fish <- read_csv("baby_fish.csv")
+
+#These are fish from BAMF : Dissected by HA and should be used for fibrosis scores
+fish_sizes <- read_csv("fish_sizes.csv")
+
+#worm weight by fish
+worm_weight<- read.csv("worm_weights.csv")%>%#merge it with the ‘worm_weight’ file.
+          mutate(Lake = as.factor(Lake),
+                 FishID = as.factor(Fish_ID))%>% 
+                 drop_na(FishID) %>%
+                mutate(total_worm_wt = rowSums(select(., contains("worm_wt_")), 
+                                               na.rm = TRUE)) 
+
+```
+
+```{r Bird Data}
+
+#Data
+birds<- read.csv("piscivorous_calls.csv")
+loons <- read.csv("loon_calls.csv")
+
+#Piscivorous bird data
+birds<- birds %>% mutate(Month = as.factor(month), 
+                         Species = as.factor("All"))
+
+birds$Month <- fct_relevel(birds$Month, c(   "August",  "September", "October", "November", "December",  "January", "February", "March", "April", "May", "June", "July"))
+
+#Loons bird data
+loons<- loons %>% mutate(Month = as.factor(month), 
+                         Species = as.factor("Loon"))
+
+loons$Month <- fct_relevel(birds$Month, c(  "August",  "September", "October", "November", "December",  "January", "February", "March", "April", "May",  "June", "July"))
+
+
+bamf_birds <- full_join(birds, loons)
+
+```
+
+
+TIDYING DATA, please read the notes within!
+
+```{r Tidying Data}
+baby_fish <- baby_fish %>%
+             mutate(Lake = as.factor(Lake), 
+                    Season = as.factor(Season),
+                    Month.adj = as.factor(Month.adj), 
+                    JOIN_ID = as.factor(JOIN_ID)) %>%
+             #If the fish has a tapeworm, but the weight was never recorded it is because it was too small. So it gets 0.00005g.
+            mutate(total_worm_wt = ifelse(Total_Worms > 0 & is.na(total_worm_wt), 0.00005, total_worm_wt), 
+                   total_worm_wt = ifelse(Total_Worms == 0, 0, total_worm_wt),
+                   max_worm_wt = ifelse(Total_Worms > 0 & max_worm_wt == 0,  0.00005, max_worm_wt))
+
+fish_sizes <- fish_sizes %>%
+             mutate(Lake = as.factor(Lake), 
+                    Season = as.factor(Season),
+                    Month = as.factor(Month),
+                    Month.adj = as.factor(Month.adj), 
+                    JOIN_ID = as.factor(JOIN_ID), 
+                    Sex = as.factor(Sex), 
+                    trans_worm_yn = ifelse(max_worm_wt>= 0.05, 1, 0)) %>%
+           #If the fish have at least 1 tapeworm, but tapeworm weight is NA, then it should be assigned
+           # 0.00005 g
+            mutate(total_worm_wt = ifelse(Total_Worms > 0 & is.na(total_worm_wt), 0.00005, total_worm_wt), 
+                   max_worm_wt = ifelse(Total_Worms > 0 & max_worm_wt == 0,  0.00005, max_worm_wt))
+
+#LET'S GET TIME ALL IN ORDER, SHALL WE?
+fish_sizes$Month.adj <- forcats::fct_relevel(fish_sizes$Month.adj, 
+                                         c( "JUL.23", "AUG", "SEP", "OCT", 
+                                           "NOV", "DEC", "JAN", "FEB", 
+                                           "MAR", "APR", "MAY", "JUN", "JUL.24"))
+
+fish_sizes$Season <- forcats::fct_relevel(fish_sizes$Season, 
+                                         c("Summer","Fall", 
+                                           "Winter", "Spring"))
+
+
+#Remember here that max_worm_weight for baby_fish is just the total worm weight. None of these weights are yet transmissible (even when summed), and they are just used for data visualization purposes. 
+
+ALL_fish <- bind_rows(
+            fish_sizes %>%
+              mutate(Data = factor("adult_fish", levels = c("baby_fish", "adult_fish"))),
+            
+            baby_fish %>%
+              mutate(Fibrosis = NA_real_,
+                     Data = factor("baby_fish", levels = c("baby_fish", "adult_fish"))))
+
+ALL_fish <- ALL_fish %>%
+            mutate(intensity_lengthcorr = (Total_Worms/Length),
+                   intensity_masscorr = (Total_Worms/Mass), 
+                  wormbiomass_fishmass = total_worm_wt/Mass)
+
+```
+
+
+################################### 
+
+# COHORTS
+
+################################### 
+
+1.  In July–Sept 2023, larger modal group = F0, smaller = F1.
+2.  After winter (say, Feb–March), the F0s should start disappearing.
+3.  By summer 2024, F1s have grown and a new small group (F2s) may
+    appear.
+4.  Fit a mixture model to each lake × month subset.
+5.  In the first summer (July–Sept 2023), rank by mean length to label
+    cohorts (F0 = largest group).
+
+#First of all, lakes have vastly different sized fish
+```{r Fish Sizes and Sampling Counts}
+
+#How many fish did we sample every month?
+sampling_effort <- ALL_fish %>%
+                   group_by(Lake, Month.adj) %>%
+                   summarize(n = n())
+
+
+ALL_fish %>%
+mutate(Lake = fct_reorder(Lake, Length, .desc = TRUE)) %>%
+ggplot(aes(x = Lake, y = Length )) +
+    geom_jitter(size = 3, alpha = 0.2, height = 0, width = 0.1)+
+    stat_summary(geom = "pointrange",
+                 shape = 21,
+                 size = 1,
+                 colour = "salmon",
+                 fill = "white",
+                 fun.data = mean_cl_boot) +
+    ylab("Length (mm)")
+
+#Fish sizes between lakes significantly differ from one another (which is one reason why we can't use simple size cutoffs)
+
+#Kruskal-Wallis test here is for non-parametric data.
+kruskal.test(Length ~ Lake, data = ALL_fish)
+
+```
+
+#MODEL-BASED CLUSTERING APPROACH BASED ON FINITE NORMAL MIXTURE
+MODELLING.
+
+Here we are doing model-based clustering based on fish length. **Using
+mclust.** + Gaussian Finite Mixture Mdoels (GMM) + Subsetted early fish,
+(G = 1:2) for F0/F1s. Mclust assigns based on BIC. + Assuming that fish
+length data are drawn from a mixture of gaussian distrubutions. + Aimed
+at discovering inherent groups within data without prior knowledge of
+labels
+
+Read more here:
+<https://luca-scr.r-universe.dev/mclust/doc/manual.html#Mclust>
+
+GMMs = assumes each fish length (xi) comes from one of G normal
+components; Mixture model below where: 
+
+\pi_k = mixture proportion (the fraction of fish in cohort K, relative abundance); this is the prior probability that a random observation belongs to cohort K **(before seeing the data!)**
+
+\mu_k = mean length of cohort k
+
+\sigma_k\^{2} = variance within that cohort
+
+$$
+p(x) \;=\; \sum_{k=1}^{G} \pi_k \,\mathcal{N}\!\bigl(x \mid \mu_k, \sigma_k^{2}\bigr),
+\quad
+\sum_{k=1}^{G}\pi_k = 1,\; \pi_k \ge 0.
+$$
+
+Mclust estimates all these parameters by maximizing the likelihood of our observed data. Then, for each fish, it computes the posterior probability and assignes the fish to whichever K gives the highest probability.
+
+Here, the numerator represents the joint probability that the data point came from cohort K and has a value of x (PRIOR). The denominator sums those joint probabilities across all possible cohorts (PRIOR: here subscript 'j' instead of 'k' because it runs over all cohorts in the denominator), turning the ratio into a posterior probability (Bayes' theorem).
+
+$$
+P(z=k \mid x)
+= \frac{\pi_k \,\mathcal{N}\!\bigl(x \mid \mu_k, \sigma_k^{2}\bigr)}
+       {\sum_{j=1}^{G} \pi_j \,\mathcal{N}\!\bigl(x \mid \mu_j, \sigma_j^{2}\bigr)}.
+$$
+
+We will also be leveraging freely available data about stickleback growth rates from DEB database: https://www.bio.vu.nl/thb/deb/deblab/add_my_pet/entries_web/Gasterosteus_aculeatus/Gasterosteus_aculeatus_res.html 
+
+[WrigWoot2004] Wright, H. A., Wootton, R. J., and Barber, I. (2004). Interpopulation variation in early growth of threespine sticklebacks (Gasterosteus aculeatus) under laboratory conditions. Can. J. Fish. Aquat. Sci., 61:1832--1838.
+
+Wright :: SL = 0.906 * TL + 0.200, r^2 = 0.996 
+
+```{r heck yeah this looks awesome!}
+
+assign_cohorts_bio <- function(ALL_fish_df,
+                                f2_months   = 12:13, ## babies in month 12–13, not before!
+                                f2_cap_mm   = 25,    #Babies are not bigger than this at 2 months in age 
+                               
+                                #**** base F1 caps from DEB curve (mm), Month 1..13 
+                                f1_cap_mm   = c(30,34,37,40,42,44,45,46,47,48,49,49,49),
+                                # lake-specific bumps in mm for selected months
+                                #SRA has super big fishies!
+                                lake_cap_bump = list(SRA = list(months = 10:13, bump_mm = 20),
+                                                     RSS = list(months = 10:13, bump_mm = 4))) {
+#Sanity checks on inputs
+  stopifnot(all(c("Lake","Month_num","Length","JOIN_ID") %in% names(ALL_fish_df)))
+  stopifnot(length(f1_cap_mm) >= max(ALL_fish_df$Month_num, na.rm = TRUE))
+
+#Quick data clean to make sure that everything is the right format and not INFs or NAs
+  df <- ALL_fish_df %>%
+          mutate(Month_num = as.integer(Month_num), Length = as.numeric(Length)) %>%
+          filter(is.finite(Length), is.finite(Month_num))
+
+# ---------- helper to fit a mixture on a single numeric vector ----------
+  # helper: up to G comps, sorted means and class ids
+  fit_components <- function(x, Gwant) {
+    x <- x[is.finite(x)]    # drop non-finite values
+    n <- length(x)
+    if (n == 0) return(list(means = numeric(0), class = integer(0)))
+
+# number of components cannot exceed number of unique values
+    G <- max(1, min(Gwant, n, length(unique(x))))
+
+# try a Gaussian mixture fit with up to G components
+# Mclust selects model and G by BIC within the provided range (1:G), where G = a cohort! (seen as a population) 
+#GAUSSIAN MIXTURE MODELS: if that throws an error (too few points)s, return a null instead of breaking my beautiful loop
+    
+    fit <- tryCatch({ if (G == 1) Mclust(x, G = 1) else Mclust(x, G = 1:G) }, error = function(e) NULL)
+
+   # if mixture fit succeeded and has means
+    if (!is.null(fit) && !is.null(fit$parameters$mean)) {
+      mu  <- as.numeric(fit$parameters$mean) #mean length of cohort K
+      ord <- order(mu)              #Order cohort by mean (small to large)
+      mu  <- mu[ord]                #sorted means from small to large
+  
+  # fit$classification are component labels in Mclust’s internal order
+  # we remap them into 1..G according to ascending mean so “1 = smallest”
+      cl  <- match(fit$classification, ord) 
+      #this is a maximum a posteriori (MAP) label = cohort with highest prob. for each fish
+      return(list(means = mu, class = cl))
+    }
+
+#FOR WINTER MONTHS, DATA DEFICIENT LAKES: Simpler clustering approach, kmeans. Does not model variance or mixture weights
+# fallback: kmeans if mixture fails; simpler geometric clustering
+    km  <- kmeans(x, centers = G, nstart = 20)
+    ord <- order(as.numeric(km$centers))
+    mu  <- sort(as.numeric(km$centers))
+    cl  <- match(km$cluster, ord)
+    list(means = mu, class = cl)
+  }
+  
+    # ---------- end helper ----------
+
+    # ---------- 1) per lake × month: fit and label by rank ----------
+
+  # 1) per lake x month fit + provisional label by rank
+  by_month <- df %>%
+    group_by(Lake, Month_num) %>%
+    group_modify(function(d, key) { # called once per lake-month group
+     
+       # allow 3 comps only in late months where F2 may appear
+      Gwant <- if (key$Month_num %in% f2_months) 3 else 2
+      
+      fm <- fit_components(d$Length, Gwant) # mixture fit on that month’s lengths
+      
+      # if no fit (empty group), return placeholders
+      if (length(fm$class) == 0)
+        return(d %>% mutate(Cohort0 = NA_character_, comp_mean = NA_real_))
+
+      d$comp      <- fm$class
+      mu_sorted   <- fm$means
+      d$comp_mean <- mu_sorted[d$comp]
+
+      # map components to cohorts based on size rank
+      # months 1–11: small → F1, large → F0
+      # months 12–13: small → F2, middle → F1, large → F0
+      if (length(mu_sorted) == 1) {
+        lab_map <- if (key$Month_num <= 3) c("F0") else c("F1")
+      } else if (length(mu_sorted) == 2) {
+        lab_map <- c("F1","F0")
+      } else {
+        lab_map <- c("F2","F1","F0")
+      }
+      d$Cohort0 <- lab_map[d$comp]
+      d
+    }) %>%
+    ungroup()
+  
+   # ---------- 2) compute monthly cohort targets (means) ----------
+  # for each lake-month-cohort, use the mean Length as the target
+
+  # 2) month targets from means
+  cohort_means <- by_month %>%
+    filter(!is.na(Cohort0)) %>%
+    group_by(Lake, Month_num, Cohort0) %>%
+    summarise(mu = mean(Length), .groups = "drop") %>%
+
+    # drop any F2 outside late months (safety)
+    mutate(Cohort0 = ifelse(Cohort0 == "F2" & !(Month_num %in% f2_months), NA, Cohort0)) %>%
+    filter(!is.na(Cohort0))
+
+  # pivot to wide so we have columns F0, F1, F2 with their monthly mean targets
+  targets <- cohort_means %>%
+    transmute(Lake, Month_num, Cohort = Cohort0, mu_mon = mu) %>%
+    tidyr::pivot_wider(names_from = Cohort, values_from = mu_mon)
+
+    # ---------- 3) assign each fish to the nearest target ----------
+
+  # 3) assign to nearest target
+  assigned <- df %>%
+    left_join(targets, by = c("Lake","Month_num")) %>%
+    mutate(
+      dF0 = ifelse(is.finite(F0), abs(Length - F0), Inf),
+      dF1 = ifelse(is.finite(F1), abs(Length - F1), Inf),
+      dF2 = ifelse(is.finite(F2), abs(Length - F2), Inf),
+  #this looks at each row, and compares real fish length to the mean of each cluster. 
+  #whichever cluster it is closest to, that's the one it will be assigned.
+      Cohort = c("F0","F1","F2")[apply(cbind(dF0, dF1, dF2), 1, which.min)]
+    )
+
+    # ---------- 4) enforce biological caps (per month, with lake bumps) ----------
+
+  # 4) apply biological caps with optional lake bumps
+  # build a per-row cap for F1
+  f1_cap_vec <- f1_cap_mm[pmin(assigned$Month_num, length(f1_cap_mm))]
+
+  # apply lake-specific bumps
+    # apply lake-specific bumps: for listed lakes and months, add bump_mm to the cap
+
+  if (length(lake_cap_bump)) {
+    for (lk in names(lake_cap_bump)) {
+      months <- lake_cap_bump[[lk]]$months
+      bump   <- lake_cap_bump[[lk]]$bump_mm
+      idx <- which(assigned$Lake == lk & assigned$Month_num %in% months)
+      if (length(idx)) f1_cap_vec[idx] <- f1_cap_vec[idx] + bump
+    }
+  }
+
+  assigned <- assigned %>%
+    mutate(
+      # F2 only in late months and very small
+      Cohort = ifelse(Month_num %in% f2_months & Length <= f2_cap_mm, "F2", Cohort),
+      Cohort = ifelse(!(Month_num %in% f2_months) & Cohort == "F2", "F1", Cohort),
+
+      # F1 cannot exceed cap -> becomes F0
+      Cohort = ifelse(Cohort == "F1" & Length > f1_cap_vec, "F0", Cohort),
+
+      # F0 cannot be below the F1 cap -> becomes F1
+      Cohort = ifelse(Cohort == "F0" & Length <= f1_cap_vec, "F1", Cohort),
+
+      Cohort = factor(Cohort, levels = c("F0","F1","F2"))
+    ) %>%
+    select(JOIN_ID, Lake, Month_num, Length, Cohort)
+
+  assigned
+}
+
+
+###################################################################
+##################################################################
+ALLfish_with_cohorts <- assign_cohorts_bio(ALL_fish, f2_months = 12:13, f2_cap_mm = 25)
+
+ALL_fish <- ALL_fish %>%
+            left_join(ALLfish_with_cohorts %>%
+                        select(JOIN_ID, Cohort) %>% 
+                        distinct(),
+                          by = c("JOIN_ID")) %>%
+            drop_na(Cohort)
+
+cohort_data_full <- ALL_fish%>%
+                    mutate(DEB = (100*Mass/(Length^3)), na.rm = T) %>%
+                    mutate(inf_yn = ifelse(Total_Worms>0, 1, 0), 
+                           trans_yn = as.integer(max_worm_wt > 0.05)) %>% #a little broader ,# 0.045
+                    group_by(Lake) %>% #X LAKE 
+                    mutate(
+                      inf_prev_lake = sum(inf_yn, na.rm=TRUE)/n(), 
+                      inf_prev_lake_trans = sum(trans_yn, na.rm=TRUE)/n())  %>%
+                    group_by(Lake, Month.adj) %>% #X LAKE X MONTH
+                    mutate(
+                      inf_prev_lake_month = sum(inf_yn, na.rm=TRUE)/n(),
+                      inf_prev_lake_month_trans = sum(trans_yn, na.rm=TRUE)/n()) %>%
+                    group_by(Lake, Cohort) %>% # XLAKE X COHORT
+                    mutate(
+                      inf_prev_lake_cohort = sum(inf_yn, na.rm=TRUE)/n()) %>%
+                    ungroup() %>%
+                    group_by(Lake, Month.adj, Cohort) %>%  #X LAKE X MONTH X COHORT
+                    mutate(
+                      inf_prev_lake_month_cohort = sum(inf_yn, na.rm=TRUE)/n()) %>%
+                    ungroup() %>%
+                    mutate(Season = as.factor(Season)) %>%
+                    mutate(hi_low_fib = case_when(
+                                  Lake %in% c("SUG", "SRA", "L2B") ~ "High",
+                                  Lake %in% c("PCH", "FRE", "BLA", "RSS", "BEW")~ "Low",
+                                 TRUE ~ NA_character_), 
+                            hi_low_fib = as.factor(hi_low_fib)) 
+
+
+fish_sizes <- fish_sizes %>%
+              left_join(
+                cohort_data_full %>% select(JOIN_ID, Cohort) %>% distinct(),
+                by = c("JOIN_ID"))
+
+####### Let's look at this ABSOLUTE BEAUTY OF A PLOT! ####
+cohort_data_full %>%
+mutate(Lake = fct_reorder(Lake, Fibrosis, .desc = TRUE)) %>%
+ggplot(aes(x = Month_num, y = Length, color = Cohort)) +
+  geom_point(alpha = 0.4, size = 4) +
+#The smoothed line is generated using a shape-constrained additive model (SCAM), where the length–month relationship #is fit with a monotone P-spline (bs = "mpi").
+  geom_smooth(method = scam::scam, #NOTE! this is from a seperate package!
+              formula = y ~ s(x, k = 4, bs = "mpi"),
+              se = T, linewidth = 1.2) +
+  facet_wrap(~Lake, ncol = 4) +
+  scale_x_continuous(
+    breaks = unique(cohort_data_full$Month_num),
+    labels = unique(cohort_data_full$Month.adj)) +
+  labs(x = "", y = "Length (mm)") +
+  scale_colour_manual(values = c("F0" = "#FF6347", 
+                                "F1" = "#477187", 
+                                "F2" = "lightblue")) +
+theme(   strip.text.x = element_text(size = 16, 
+                                     margin = margin(0.25,0,0.25,0, "cm")),
+            axis.title.y = element_text(size = 22, 
+                                        angle = 90, margin = margin(r = 10)),
+            axis.title.x = element_text(size = 22, margin = margin(5)),
+            axis.text.y = element_text(size = 18),
+            #legend.position = "none" ,
+            axis.text.x = element_text(size = 18) )  
+
+
+
+```
+
+
+################################### 
+
+# Generating clusters of high/low fibrosis lakes
+
+################################### 
+
+
+```{r Hi-Low Lake Clustering (not int.prev.)}
+
+lake_summary <- fish_sizes %>%
+                group_by(Lake) %>%
+                summarise(
+                  fib_median   = median(Fibrosis, na.rm = TRUE),
+                  fib_mean     = mean(Fibrosis, na.rm = TRUE),
+                  fib_se =  sd(Fibrosis, na.rm = TRUE)/sqrt(sum(!is.na(Fibrosis))),
+                
+                  prp_trans = mean(trans_worm_yn),
+                  se_trans = sqrt(prp_trans * (1 - prp_trans) / n()),
+                  
+                  inf_prev     = mean(Total_Worms > 0, na.rm = TRUE),
+                  mean_worm_intensity = mean(Total_Worms, na.rm = TRUE),
+                  mean_worm_burden = mean(total_worm_wt, na.rm = TRUE),
+                  burden_se =  sd(total_worm_wt, na.rm = TRUE)/sqrt(sum(!is.na(total_worm_wt))),
+                  .groups = "drop" )
+
+lake_summary
+# Then feed fib_median or fib_mean into PAM
+#this is giving the highest weight to fibrosis
+
+w <- c(fib_mean = 0.7,  inf_prev = 0.15, mean_worm_burden = 0.15)
+
+#Daily is a dissimilarity matrix for mixed-type data
+diss <- daisy( lake_summary %>% select(fib_mean,  inf_prev, mean_worm_burden),
+               metric = "gower", stand = TRUE, weights = as.numeric(w))
+diss
+
+##################
+### How many clusters should I choose for my PAM matrix?
+
+sil_widths <- sapply(2:5, function(k) {
+  pam(diss, k = k)$silinfo$avg.width
+})
+plot(2:5, sil_widths, type = "b", xlab = "k", ylab = "Average silhouette width")
+
+######################
+
+pam_fit <- pam(diss, k = 2)
+
+
+lake_summary %>% mutate(cluster = factor(pam_fit$clustering))
+
+###
+
+###
+fish_sizes <- fish_sizes %>% mutate(hi_low_fib = case_when(
+                                                Lake %in% c("SUG", "SRA", "L2B") ~ "High",
+                                                Lake %in% c("PCH", "FRE", "BLA", "RSS","BEW")~ "Low",
+                                               TRUE ~ NA_character_), 
+                                    hi_low_fib = as.factor(hi_low_fib))
+
+ALL_fish <- ALL_fish %>% mutate(hi_low_fib = case_when(
+                                                Lake %in% c("SUG", "SRA", "L2B") ~ "High",
+                                                Lake %in% c("PCH", "FRE", "BLA", "RSS","BEW")~ "Low",
+                                               TRUE ~ NA_character_), 
+                                    hi_low_fib = as.factor(hi_low_fib))
+
+```
+
+
+################################### 
+# VISUALIZATIONS
+###################################
+
+Here each chunk acts as a chapter of information, open up to unravel the fun!
+As follows:
+1. Fibrosis score + Temporal Viz 
+2. Parsite burden (frequentist approach!) + Temporal Viz. (Note! We use Bayesian version for final plot)
+3. Transmissible stages + Temportal Viz.
+4. Definitive host occurence + Temporal Viz
+
+```{r Fibrosis Score/Time}
+
+#With a smoother
+#FIBROSIS BY COHORT + HI/LOW FIBROSIS
+A1<- fish_sizes %>%
+  filter(!Cohort %in% c(NA ,"F2")) %>%
+  ggplot(aes(x = Month.adj, colour =  hi_low_fib, fill = hi_low_fib,
+             y = Fibrosis)) +
+  geom_jitter(width = 0.1, height = 0.08, 
+             size = 3, alpha = 0.01) +
+  stat_smooth(method = "gam", 
+              aes(group = hi_low_fib), alpha = 0.1,
+              formula = y ~ s(x, bs = "tp", k = 3), #cr, cc
+              fullrange = T ) +
+  labs(x = "", y = "Fibrosis Score (0-4)") +
+  theme(strip.text = element_text(size = 18),
+        axis.text.y = element_text(size = 18),
+        axis.title.y = element_text(size = 22, 
+                          angle =90, margin = margin(r = 15))) +
+  theme(legend.position = "None")+
+  scale_colour_manual( values = c("Low" = "darkgrey",
+                                "High"  = "#1D9E75")) +
+ scale_fill_manual( values = c("Low" = "darkgrey",
+                                "High"  = "#1D9E75")) 
+
+A1
+####### Now incorporating cohort into it
+
+B1<- fish_sizes %>%
+  filter(!Cohort %in% c(NA ,"F2")) %>%
+  ggplot(aes(x = Cohort, colour =  hi_low_fib,
+             y = Fibrosis)) +
+  geom_jitter(width = 0.1, height = 0.08, 
+             size = 3, alpha = 0.02) +
+    stat_summary(geom = "line",
+               aes(group = hi_low_fib), linetype = "dashed",
+                 shape = 21,  size = 0.8, fill = "white",
+                 fun.data = mean_cl_boot) +
+  stat_summary(geom = "pointrange",
+                 shape = 21,  size = 1,
+                 stroke = 2, fill = "white",
+                 fun.data = mean_cl_boot) +
+  labs(x = "", y = "Fibrosis Score (0-4)") +
+  theme(strip.text = element_text(size = 18),
+        axis.title.x = element_text(size = 18),
+        axis.text.x = element_text(size = 18),
+        axis.text.y = element_text(size = 18),
+        axis.title.y = element_text(size = 18, 
+                        angle =90, margin = margin(r = 15))) +
+  theme(legend.position = "None")+
+  scale_colour_manual(
+  values = c("Low" = "darkgrey",
+             "High"  = "#1D9E75"))
+
+B1
+
+```
+
+```{r Parasite burden/Time}
+
+#If you want to see anything, you have to filter out the 0s
+
+#wormbiomass: fishmass
+A2<- cohort_data_full %>%
+  filter(!Cohort %in% c(NA ,"F2")) %>%
+  filter(Total_Worms > 0) %>%
+  ggplot(aes(x = Month.adj, colour =  hi_low_fib,
+             y = wormbiomass_fishmass)) + 
+  #total_worm_wt, log(total_worm_wt+1), total_worm_wt/Mass
+  #max_worm_wt, log(total_worm_wt+1), max_worm_wt/Mass
+  #wormbiomass_fishmass
+  geom_jitter(width = 0, height = 0, 
+             size = 3, alpha = 0.01) +
+  stat_smooth(method = "gam", 
+              aes(group = hi_low_fib),
+              formula = y ~ s(x, bs = "tp", k = 6), #cr, cc
+              fullrange = T ) +
+  labs(x = "", y = "Parasite:host biomass ratio (worm g/host g)") + #Size corrected infection burden
+  theme(strip.text = element_text(size = 18),
+        axis.text.y = element_text(size = 18),
+        axis.title.y = element_text(size = 22, 
+                          angle =90, margin = margin(r = 15))) +
+  theme(legend.position = "None")+
+  coord_cartesian(ylim = c(0, 0.3))+
+  scale_colour_manual(
+  values = c("Low" = "darkgrey",
+             "High"  = "#1D9E75"))
+
+
+A2
+
+
+cohort_data_full %>%
+  filter(!Cohort %in% c(NA ,"F2")) %>%
+  filter(Total_Worms > 0) %>%
+  ggplot(aes(x = Month.adj, colour =  hi_low_fib,
+             y = Length)) + #max_worm_wt
+  #total_worm_wt, log(total_worm_wt+1), total_worm_wt/Mass
+  #max_worm_wt, log(total_worm_wt+1), max_worm_wt/Mass
+  #wormbiomass_fishmass
+  geom_jitter(width = 0, height = 0, 
+             size = 3, alpha = 0.01) +
+  stat_smooth(method = "gam", 
+              aes(group = hi_low_fib),
+              formula = y ~ s(x, bs = "tp", k = 6), #cr, cc
+              fullrange = T ) +
+  labs(x = "", y = "Length in infected hosts (mm)") + 
+  #Size corrected infection burden
+  #Max. worm weight in host (g)
+  theme(strip.text = element_text(size = 18),
+        axis.text.y = element_text(size = 18),
+        axis.title.y = element_text(size = 22, 
+                          angle =90, margin = margin(r = 15))) +
+  theme(legend.position = "None")+
+  #coord_cartesian(ylim = c(0, 0.3))+
+  scale_colour_manual(
+  values = c("Low" = "darkgrey",
+             "High"  = "#1D9E75"))
+
+
+
+
+####### Now incorporating cohort into it
+
+B2<- 
+  fish_sizes %>%
+  filter(!Cohort %in% c(NA ,"F2")) %>%
+    filter(Total_Worms > 0) %>%
+  ggplot(aes(x = Cohort, colour =  hi_low_fib,
+             y = wormbiomass_fishmass)) +
+  geom_jitter(width = 0.08, height = 0, 
+             size = 3, alpha = 0.02) +
+    stat_summary(geom = "line",
+               aes(group = hi_low_fib), linetype = "dashed",
+                 shape = 21,  size = 0.8, fill = "white",
+                 fun.data = mean_cl_boot) +
+  stat_summary(geom = "pointrange",
+                 shape = 21,  size = 1,
+                 stroke = 2, fill = "white",
+                 fun.data = mean_cl_boot) +
+    coord_cartesian(ylim = c(0, 0.3))+
+
+  labs(x = "", y = "Parasite:host biomass ratio (worm g/host g)") +
+  theme(strip.text = element_text(size = 18),
+        axis.title.x = element_text(size = 18),
+        axis.text.x = element_text(size = 18),
+        axis.text.y = element_text(size = 18),
+        axis.title.y = element_text(size = 18, 
+                        angle =90, margin = margin(r = 15))) +
+  theme(legend.position = "None")+
+  scale_colour_manual(
+  values = c("Low" = "darkgrey",
+             "High"  = "#1D9E75"))
+
+
+B2
+
+```
+
+```{r Max # Transmissible stages}
+#max worm weight by hi/low fib by month
+#count transmissible parasites (sum trans worm yn)/total parasites (sum total parasites)
+
+trans <- cohort_data_full %>%
+          select(Month.adj, Lake, hi_low_fib, JOIN_ID, Cohort,Season, Month_num,
+                 Total_Worms, max_worm_wt) %>%
+          mutate(max_worm_wt = ifelse(Total_Worms == 0, 0, max_worm_wt), 
+                 trans_worm_yn = ifelse(max_worm_wt >= 0.05, 1, 0)) %>%
+          group_by(hi_low_fib, Month.adj) %>%
+          mutate(prp_trans_stages = sum(trans_worm_yn, na.rm = T)/sum(Total_Worms, na.rm = T), 
+                 tot_trans_stages = sum(trans_worm_yn, na.rm = T))%>%
+          ungroup()
+
+trans_co <- trans %>%
+             group_by(hi_low_fib, Cohort) %>%
+             filter(!Cohort == "F2") %>%
+             summarise(tot_trans_stages = sum(trans_worm_yn, na.rm = T))
+
+
+############################
+### MAX INFECTION ########
+########################
+
+
+A4<- trans %>%
+  #   filter(hi_low_fib == "High") %>%
+  ggplot(aes(x = Month.adj, colour =  hi_low_fib,
+             y = log(tot_trans_stages+1))) + 
+  geom_jitter(width = 0, height = 0, 
+             size = 3, alpha = 0.01) +
+  stat_smooth(method = "gam", 
+              aes(group = hi_low_fib),
+              formula = y ~ s(x, bs = "tp", k = 3), #cr, cc
+              fullrange = T ) +
+  labs(x = "", y = "log(# transmissible stages +1)") + #Size corrected infection burden
+  theme(strip.text = element_text(size = 18),
+        axis.text.y = element_text(size = 18),
+        axis.title.y = element_text(size = 22, 
+                          angle =90, margin = margin(r = 15))) +
+  theme(legend.position = "None")+
+  scale_colour_manual(
+  values = c("Low" = "darkgrey",
+             "High"  = "#1D9E75"))
+
+
+A4
+
+####### Now incorporating cohort into it
+
+B4<- trans_co %>%
+  ggplot(aes(x = Cohort, colour =  hi_low_fib,
+             y = tot_trans_stages)) +
+
+    stat_summary(geom = "line",
+               aes(group = hi_low_fib), linetype = "dashed",
+                 shape = 21,  size = 0.8, fill = "white",
+                 fun.data = mean_cl_boot) +
+  stat_summary(geom = "pointrange",
+                 shape = 21,  size = 1,
+                 stroke = 2, fill = "white",
+                 fun.data = mean_cl_boot) +
+  ylim(0, 110)+
+  labs(x = "", y = "# transmissible stages/total parasites") +
+  theme(strip.text = element_text(size = 18),
+        axis.title.x = element_text(size = 18),
+        axis.text.x = element_text(size = 18),
+        axis.text.y = element_text(size = 18),
+        axis.title.y = element_text(size = 18, 
+                        angle =90, margin = margin(r = 15))) +
+  theme(legend.position = "None")+
+  scale_colour_manual(
+  values = c("Low" = "darkgrey",
+             "High"  = "#1D9E75"))
+B4
+
+```
+
+```{r Definitive Host Occurence}
+
+#Not lake specific, note month offset. Bird data observations started in August. 
+
+birds$Month <- factor(birds$Month,
+                      levels = c("", levels(birds$Month)))
+levels(birds$Month)
+
+BRD<- birds %>%
+  ggplot(aes(x = Month,
+             y = piscivore_calls)) + 
+      geom_line(aes(group = 1), size = 1) +
+    scale_x_discrete(drop = FALSE) +
+  labs(y = "Piscivore calls (count)", x = "")+
+  theme(strip.text = element_text(size = 18),
+        axis.text.y = element_text(size = 18),
+        axis.title.y = element_text(size = 22, 
+                          angle =90, margin = margin(r = 15))) +
+  theme(legend.position = "None")
+
+BRD
+
+SP<- birds %>%
+  ggplot(aes(x = Month,
+             y = n_species)) + 
+      geom_line(aes(group = 1), size = 1) +
+    scale_x_discrete(drop = FALSE) +
+  labs(y = "Number of piscovorous species (count)", x = "")+
+  theme(strip.text = element_text(size = 18),
+        axis.text.y = element_text(size = 18),
+        axis.title.y = element_text(size = 22, 
+                          angle =90, margin = margin(r = 15))) +
+  theme(legend.position = "None")
+
+SP
+
+ggsave("bird.png", BRD, height = 4, width = 6)
+
+########################################
+#### CO-OCCURRENCE ####################
+
+trans_sum <- trans %>%
+              group_by(hi_low_fib, Month.adj) %>%
+              filter(!Month.adj == "JUL.23") %>% #there isn't these data for the birds
+  #Before the filter = 14 HI/181 Low
+  #After the filter = 13 HI/ 139 Low
+              summarise(tot_trans_stages = first(tot_trans_stages), 
+                        .groups = "drop") %>%
+              ungroup() %>%
+              mutate(Month = dplyr::recode(Month.adj,
+                                           "AUG" = "August",
+                                           "SEP" = "September",
+                                           "OCT" = "October",
+                                           "NOV" = "November",
+                                           "DEC" = "December",
+                                           "JAN" = "January",
+                                           "FEB" = "February",
+                                           "MAR" = "March",
+                                           "APR" = "April",
+                                           "MAY" = "May",
+                                           "JUN" = "June",
+                                           "JUL.24" = "July"))
+
+sum(trans_sum$tot_trans_stages[trans_sum$hi_low_fib == "High"])
+sum(trans_sum$tot_trans_stages[trans_sum$hi_low_fib == "Low"])
+
+infbird<- full_join(trans_sum, birds, by = "Month")
+
+#infsp<- 
+  infbird %>%
+  #filter(hi_low_fib == "High") %>%
+  ggplot(aes(x = n_species, colour =  hi_low_fib,
+             #piscivore_calls
+             y = tot_trans_stages)) + 
+  stat_smooth(method = "gam", 
+              fill = "lightgrey",
+              aes(group = hi_low_fib),
+              formula = y ~ s(x, bs = "tp", k = 3),
+              fullrange = T ) +
+    geom_point(size = 3, shape = 16) +
+  labs(x = "Number of piscovorous species (count)", y = "# transmissible stages/total parasites") + #
+  theme(axis.text.x = element_text(size = 18),
+        axis.text.y = element_text(size = 18),
+        axis.title.x = element_text(size = 22),
+        axis.title.y = element_text(size = 22, angle =90, margin = margin(r = 15))) +
+  theme(legend.position = "None")+
+  scale_colour_manual(
+  values = c("Low" = "darkgrey",
+             "High"  = "#1D9E75"))
+
+
+#what if we scale the trans. so we can better see the relationship?
+infsp<- infbird %>%
+  group_by(hi_low_fib) %>%
+  mutate(tot_trans_scaled = scale(tot_trans_stages)) %>%
+  ggplot(aes(x = n_species,
+             y = tot_trans_scaled,
+             colour = hi_low_fib)) +
+   stat_smooth(method = "gam", 
+              fill = "#B0B0B001",
+              alpha = 0.05,
+              aes(group = hi_low_fib),
+              formula = y ~ s(x, bs = "tp", k = 3),
+              fullrange = T ) +
+    geom_point(size = 3) +
+    labs(x = "Number of piscovorous species (count)", 
+         y = "# transmissible stages/total parasites") + 
+  theme(axis.text.x = element_text(size = 18),
+        axis.text.y = element_text(size = 18),
+        axis.title.x = element_text(size = 22),
+        axis.title.y = element_text(size = 22, angle =90, margin = margin(r = 15))) +
+  theme(legend.position = "None")+
+  scale_colour_manual(values = c("Low" = "darkgrey",
+                                   "High"  = "#1D9E75"))
+
+infsp
+
+```
+
+```{r All glued together for megaplot}
+#Let's put it all together
+library(cowplot)
+library(patchwork)
+
+time<- A2/A1/A4/SP #A2 here is frequentist, but we use bayesian one for paper
+age<-  B2/B1/B4/infsp #B3
+
+time
+ggsave("time.png", time, height = 10, width = 3.5)
+ggsave("age.png", age, height = 10, width = 3.5)
+
+#### For presentations
+
+A1+B1
+A2+B2
+
+A4 + B4
+A4/SP
+infsp
+
+```
+
+#VIRULENCE-TRANSMISSION TRADE-OFF
+```{r EMPIRICAL DATA FOR V-T TRADE OFF}
+
+#We want to know, mean transmissible tapeworm size per lake. That means that across all of the worm measures here, look for the ones that are >0.05g (~158 worms).
+
+lake_trans_worms <- worm_weight %>%
+                  pivot_longer(
+                    cols = starts_with("worm_wt_"), names_to = "worm_id",
+                    values_to = "worm_wt_g" ) %>%
+                   filter(!is.na(worm_wt_g), worm_wt_g > 0.05) %>% 
+  # transmissible threshold
+                   group_by(Lake) %>%
+                     #NOTE: THERE ARE ONLY 7 LAKES HERE, BEW HAS NO TRANS. WORMS
+                   summarise(
+                            max_trans_g = max(worm_wt_g),
+                            mean_trans_g = mean(worm_wt_g),
+                            se_trans_g   = sd(worm_wt_g) / sqrt(n()),
+                            n_trans_worms = n(),
+                            n_fish_with_trans = n_distinct(FishID),
+                            .groups = "drop" )
+
+########################################################################
+lake_summary1 <- fish_sizes %>% #no individual worm data on baby fish
+                mutate( trans_yn = as.integer(trans_worm_yn == 1) ) %>%
+                group_by(Lake) %>%
+                summarise(
+                  # Max worm weight: unconditional mean (includes zeros)
+                  mean_max_worm = mean(max_worm_wt, na.rm = TRUE),
+                  se_maxworm    = sd(max_worm_wt, na.rm = TRUE) /
+                    sqrt(sum(!is.na(max_worm_wt))),
+              
+                  # Max worm weight among infected only (exclude zeros)
+                  mean_max_worm_inf = mean(ifelse(max_worm_wt > 0, max_worm_wt,
+                                                  NA_real_), na.rm = TRUE),
+                  se_maxworm_inf    = sd(ifelse(max_worm_wt > 0, max_worm_wt,
+                                                NA_real_),  na.rm = TRUE) /
+                                      sqrt(sum(!is.na(ifelse(max_worm_wt > 0,max_worm_wt,
+                                                             NA_real_)))),
+                  
+                 #infected prevalence over entire year
+                  inf_prev_year = mean(Total_Worms > 0, na.rm = TRUE),
+                  .groups = "drop" )
+
+#####################################
+ ### Integrated prevalence ####
+#####################################
+
+yearly_df <- cohort_data_full %>%
+              arrange(Lake, Month_num) %>%
+              group_by(Lake, hi_low_fib) %>%
+              mutate(
+                dx = Month_num - lag(Month_num),
+                trap_area = dx * (inf_prev_lake_month + lag(inf_prev_lake_month)) / 2 , 
+                trap_area_trans = dx * (inf_prev_lake_month_trans +     
+                                            lag(inf_prev_lake_month_trans)) / 2) %>%
+             summarise( int_inf_prev = sum(trap_area, na.rm = TRUE))
+##################################################
+   
+# Step 1: monthly prevalence per lake
+monthly_prev <- fish_sizes %>%
+                  group_by(Lake, Month.adj) %>%
+                  summarise(  inf_prev_month = mean(Total_Worms > 0, na.rm = TRUE),
+                    .groups = "drop")
+
+# Step 2: max monthly prevalence per lake
+max_monthly_prev <- monthly_prev %>%
+                    group_by(Lake) %>%
+                    summarise(  
+                      max_inf_prev = max(inf_prev_month, na.rm = TRUE),
+                      mean_inf_prev = mean(inf_prev_month, na.rm = TRUE),
+                      .groups = "drop"  )
+        
+  
+lake_summary1 <- lake_summary1 %>% left_join(yearly_df, by = "Lake")
+lake_summary1 <- lake_summary1 %>% left_join(max_monthly_prev, by = "Lake")
+
+#With trans as welll
+vt<-
+lake_summary1 %>%
+  ggplot() + #inf_prev
+  stat_smooth( aes(y = int_inf_prev, x = mean_max_worm_inf, group = 1), 
+              method = "gam",
+              fill = "lightgrey", colour = "black",
+              formula = y ~ s(x, bs = "tp", k = 7)) +
+          labs(y = "Integrated infection prevalence
+(proportion × months)", 
+               x = "Parasite burden 
+(max. worm weight (g) per infected host)") +
+        
+      geom_text(aes(label = Lake, y = int_inf_prev, x = mean_max_worm_inf), vjust = -1.5, 
+                hjust = 0.85, size = 3)  +
+                # vertical error bars (SE on infection prevalence)
+  geom_errorbarh(aes(xmin = mean_max_worm_inf - se_maxworm_inf,
+                    xmax = mean_max_worm_inf + se_maxworm_inf, 
+                    y = int_inf_prev, x = mean_max_worm_inf), width = 0) +
+    geom_point(aes(y = int_inf_prev, x = mean_max_worm_inf, 
+                 colour = hi_low_fib),  size = 4) +
+  
+      scale_colour_manual(
+              values = c("Low" = "darkgrey","High"  = "#1D9E75"))+
+      theme( axis.title.y = element_text(size = 22, angle = 90, margin = margin(r = 10)),
+             axis.title.x = element_text(size = 22, margin = margin(5)),
+            axis.text.y = element_text(size = 18),
+            axis.text.x = element_text(size = 18),
+            legend.position = "none"  )  
+
+vt
+
+ggsave("v_t.png", vt, height = 7, width = 7)
+ 
+###### Reviewer Response: Integrated infection prevalence vs. infection prevalence
+
+#See Hite et al. (2016) Ecology.
+#See Civitello et al. (2015) Journal of Animal Ecology
+ 
+#Integrated infection prev. vs. **MEAN* annual infeciton prevalence
+lake_summary1 %>%
+    ggplot(aes(y = mean_inf_prev, x = int_inf_prev, colour = hi_low_fib)) +
+        geom_point(size = 4) +
+        stat_cor(aes(group =1 ))+
+        stat_smooth(method = "glm", aes(group =1), colour = "black") +
+        scale_colour_manual(
+              values = c("Low" = "darkgrey","High"  = "#1D9E75"))+
+        labs(x = "Integrated infection prevalence
+(units of proportion × months)", 
+             y = "Mean annual infection prevalence
+(lake-level, proportion infected)") 
+
+
+#Integrated infection prev. vs. **MAX** annual infection prevalence
+lake_summary1 %>%
+    ggplot(aes(y = max_inf_prev, x = int_inf_prev, colour = hi_low_fib)) +
+        geom_point(size = 4) +
+        stat_cor(aes(group =1 ))+
+        stat_smooth(method = "glm", aes(group =1), colour = "black") +
+        scale_colour_manual(
+              values = c("Low" = "darkgrey","High"  = "#1D9E75"))+
+        labs(x = "Integrated infection prevalence
+(units of proportion × months)", 
+             y = "Maximum annual infection prevalence
+(lake-level, proportion infected)") 
+
+
+        
+###
+cor_lab <- lake_summary1%>%
+  summarise(
+    rho = cor(mean_inf_prev, int_inf_prev, method = "pearson", use = "complete.obs"), 
+    #pearson, spearman
+    p = cor.test(mean_inf_prev, int_inf_prev,  method = "pearson")$p.value) 
+
+cor_lab
+
+#"This index of epidemic size is highly correlated with another index, maximum infection prevalence (R = 0·914, P < 0·00151), which ranged from 18 to 42% in these lakes in from July 2023 to July 2024".
+######## 
+
+```
+
+################################### 
+# Models
+###################################
+
+# PARASITE BIOMASS
+
+Here, I originally attempted to do infection only-- but none of the stats work out because the differences between groups is just so large. So, let's embrace the nature of the data and models both the zeros and non-zeros. 
+
+Parasite biomass cannot be captured by gamms or glmms. 
+
+**E[y] = (1 - zi) × mu**
+Where zi is the probability of being a structural zero (uninfected) and mu is the expected burden given the fish is infected. So:
+
+**.epred = (1 - zi) × mu** -- the population-level prediction, averaging over infected and uninfected fish
+mu = the conditional prediction -- expected burden given the fish is infected
+
+```{r Bayesian, simplified}
+
+cohort_data_mod <- cohort_data_full %>% #includes babies (but not their fibrosis)
+                  filter(!Cohort == "F2") %>%
+                  mutate(Cohort = droplevels(Cohort)) 
+
+####################################
+######### COMPLEX SPLINES WITH A TP CURVE ##############
+####################################
+
+bf_zib_final <- bf(wormbiomass_fishmass ~ hi_low_fib + Cohort +
+                        s(Month_num, by = hi_low_fib, bs = "tp", k = 5),
+                      zi ~ hi_low_fib + (1 | Lake) +
+                        s(Month_num, by = hi_low_fib, bs = "tp", k = 4),
+                      phi ~ hi_low_fib + (1 | Lake) +
+                        s(Month_num, by = hi_low_fib, bs = "tp", k = 4))  # bumped from 3
+                    
+
+pri_zib_final <- c(
+  # mu
+  prior(student_t(3, 0, 2.5), class = "Intercept"),
+  prior(normal(0, 0.6), class = "b"),
+  prior(exponential(1), class = "sds"),
+  # no sd for mu -- Lake removed from mu
+  
+  # zi
+  prior(student_t(3, 0, 2.5), class = "Intercept", dpar = "zi"),
+  prior(normal(0, 0.6), class = "b", dpar = "zi"),
+  prior(exponential(1), class = "sds", dpar = "zi"),
+  prior(student_t(3, 0, 2.5), class = "sd", dpar = "zi"),
+  
+  # phi
+  prior(normal(log(40), 0.6), class = "Intercept", dpar = "phi"),
+  prior(normal(0, 0.3), class = "b", dpar = "phi"),
+  prior(exponential(1), class = "sds", dpar = "phi"),
+  prior(student_t(3, 0, 2.5), class = "sd", dpar = "phi"))
+
+
+###### Let's run it
+fit_zib_final <- brms::brm(
+                bf_zib_final,
+                data = cohort_data_mod,
+                family = brms::zero_inflated_beta(),
+                prior = pri_zib_final,
+                chains = 4, iter = 3000, warmup = 1000,
+                threads = threading(4),
+                control = list(adapt_delta = 0.99, max_treedepth = 14),
+                seed = 2025)
+
+
+################
+#### Plotting outcomes ###
+################
+
+#This plots EVERYTHING (including zeros!), note scale difference
+pred_grid <- expand.grid(
+  Month_num = seq(1, 13, by = 0.25),
+  hi_low_fib = c("High", "Low"),
+  Cohort = "F0")
+
+pred_grid %>%
+  add_epred_draws(fit_zib_final, re_formula = NA) %>%
+  group_by(Month_num, hi_low_fib) %>%
+  summarise(mean = mean(.epred),
+            lower = quantile(.epred, 0.025),
+            upper = quantile(.epred, 0.975)) %>%
+  ggplot(aes(x = Month_num, y = mean,
+             color = hi_low_fib, fill = hi_low_fib)) +
+  geom_ribbon(aes(ymin = lower, ymax = upper), alpha = 0.3, color = NA) +
+  geom_line(linewidth = 1) +
+  scale_color_manual(values = c("High" = "#2d8f6f", "Low" = "grey50")) +
+  scale_fill_manual(values = c("High" = "#2d8f6f", "Low" = "grey50"))
+
+############################################
+## Now let's just look at infected individuals
+# given this fish is infected, what burden do we expect?
+
+# get mu draws (burden given infected)
+mu_draws <- pred_grid %>%
+  add_epred_draws(fit_zib_final, re_formula = NA, dpar = "mu")
+
+
+BAYE<- mu_draws %>%
+  group_by(Month_num, hi_low_fib) %>%
+  summarise(mean = mean(mu),
+            lower = quantile(mu, 0.025),
+            upper = quantile(mu, 0.975)) %>%
+  ggplot(aes(x = Month_num, y = mean,
+             color = hi_low_fib, fill = hi_low_fib)) +
+  geom_ribbon(aes(ymin = lower, ymax = upper), alpha = 0.1, color = NA) +
+  geom_line(linewidth = 1) +
+  geom_point(aes(y = wormbiomass_fishmass,
+                 x = Month_num),  alpha = 0.05, size = 3,
+             data = cohort_data_mod%>% 
+             filter(wormbiomass_fishmass > 0)) +
+  labs(y = "Parasite burgen (g worm/g host)", x = "")+
+  theme( legend.position = "none",
+         axis.text.x = element_text(size = 18),
+         axis.text.y = element_text(size = 18),
+         axis.title.y = element_text(size = 22, 
+                          angle =90, margin = margin(r = 15))) +
+  scale_x_continuous(breaks = seq(1, 13, by =1))+
+  ylim(0, 0.3)+
+  scale_color_manual(values = c("High" = "#1D9E75", "Low" = "grey50")) +
+  scale_fill_manual(values = c("High" = "#1D9E75", "Low" = "grey50")) 
+
+
+ggsave("baye.png", BAYE, height = 3, width = 4)
+
+
+#################################
+## Pulling quantities: 
+#how do these peaks look between hi_low_fib in INFECTED INFIVIDUALS?
+#######
+
+peak_draws <- mu_draws %>%
+              group_by(hi_low_fib, .draw) %>%
+              slice_max(mu, n = 1) %>%
+              dplyr::select(hi_low_fib, .draw, Month_num, mu)
+
+
+# summarise posterior of peak timing
+### HI FIB = 5 (NOVEMBER); LOW-FIB 6.75 (LATE-DEC/JAN)
+peak_draws %>%
+  group_by(hi_low_fib) %>%
+  summarise(
+    peak_median = median(Month_num), 
+    peak_lower = quantile(Month_num, 0.025),
+    peak_upper = quantile(Month_num, 0.975))
+
+
+###################
+
+########################
+# MODEL QUALITY CHECKS
+################
+
+#### OUTPUT ####
+
+summary(fit_zib_final) #fit_zib_point, fit_simple
+bayesplot::mcmc_intervals(fit_zib_final, regex_pars = "b_") +theme_classic()
+bayesplot::mcmc_intervals(fit_zib_final, regex_pars = "^sds_") +theme_classic()
+
+#Let's check the random effect
+brms::VarCorr(fit_zib_final)
+ranef(fit_zib_final)
+
+#################
+#### QUALITY CHECKS 
+#################
+plot(fit_zib_final) #fit_zib_point, 
+neff_ratio(fit_zib_final) #→ all > 0.1 (preferably > 0.4) 
+mcmc_neff(neff_ratio(fit_zib_final))
+
+
+y    <- fit_zib_final$data$wormbiomass_fishmass
+yrep <- posterior_predict(fit_zib_final, ndraws = 500) 
+
+# correct PPC for a scalar statistic
+ppc_stat(y, yrep, stat = function(z) mean(z == 0)) +
+  labs(title = "P(Y = 0) overall")
+
+pp_check(fit_zib_final, type = "stat", stat = "mean")
+
+# LOO cross validation
+loo_zib_final <- loo(fit_zib_final)
+print(loo_zib_final)
+
+#####################
+#DHARMA QUALITY CHECK!
+#####################
+
+dharma_zib <- DHARMa::createDHARMa(
+  simulatedResponse = t(posterior_predict(fit_zib_final)),
+  observedResponse = cohort_data_mod$wormbiomass_fishmass[!is.na(cohort_data_mod$wormbiomass_fishmass)],
+  fittedPredictedResponse = apply(posterior_predict(fit_zib_final), 2, median),
+  integerResponse = FALSE)
+
+plot(dharma_zib)
+
+#####################
+# TEMPORAL AUTOCORRELATION
+#####################
+library(spdep)
+
+resid <- residuals(model.check)  #residuals from this is from the dharma quality check
+#Month infomation
+month <- mf$Month_num
+mf <- model.frame(fit_zib_final) 
+
+# Aggregate residuals by month
+df_resid <- data.frame(month = month, resid = resid)
+resid_month <- aggregate(resid ~ month, data = df_resid, FUN = mean)
+
+# Build 2D coordinates for 1D time
+coords <- cbind(resid_month$month, rep(0, nrow(resid_month)))
+
+# Nearest-neighbor weights
+nb <- knn2nb(knearneigh(coords, k = 1))
+lw <- nb2listw(nb, style = "W")
+
+# Moran's I on temporal structure
+moran.test(resid_month$resid, lw)
+```
+
+
+#FIBROSIS
+
+Using gamms to look at immune expression across time
+```{r Fibrosis timing}
+# Data for models
+######################
+
+fish_sizes_mod <- fish_sizes %>%
+              filter(!Cohort == "F2") %>%
+              mutate(fib_int = as.integer(Fibrosis) + 1, 
+                     inf_yn = as.integer(ifelse(Total_Worms>0, 1, 0))) %>% #for ocat model
+              group_by(Lake, Month.adj) %>%
+              mutate(inf_prev_lake_month = sum(inf_yn, na.rm=TRUE)/n()) %>%
+              ungroup() %>%
+              group_by(Lake, Month.adj, Cohort) %>%
+              mutate(inf_prev_lake_month_cohort = sum(inf_yn, na.rm=TRUE)/n()) %>%
+              ungroup()
+
+cohort_data_mod <- cohort_data_full %>% #includes babies (but not their fibrosis)
+                  filter(!Cohort == "F2") %>%
+                 mutate(Cohort = droplevels(Cohort))  %>%  # <- THIS is the key line
+                  mutate(fib_int = as.integer(Fibrosis) + 1) #for ocat model
+
+fish_sizes_mod$Cohort <- fct_relevel(fish_sizes_mod$Cohort, "F0")
+#############################################
+m_fib <- mgcv::gam(
+               fib_int ~ Cohort + max_worm_wt+ hi_low_fib *inf_yn+
+                          s(Month_num, by = hi_low_fib, 
+                            bs = "tp", k = 4) +
+                          s(Lake, bs = "re"),
+                          family = ocat(R = 5),
+                          data   = fish_sizes_mod,
+                          knots  = list(Month_num = c(1, 13)),
+                          method = "REML")
+
+#max.worm wt n.s., so dropped.
+m_fib1 <- mgcv::gam(
+                    fib_int ~ Cohort +  hi_low_fib *inf_yn+  
+                         # deviation smooths by fibrosis regime
+                          s(Month_num, by = hi_low_fib, 
+                            bs = "tp", k = 4) + #3
+                          s(Lake, bs = "re"),
+                          family = ocat(R = 5),
+                          data   = fish_sizes_mod,
+                          knots  = list(Month_num = c(1, 13)),
+                          method = "REML")
+
+#testing the interaction and dropping that prevalence 
+AIC(m_fib,  m_fib1) 
+
+#######################################
+
+summary(m_fib1)
+plot(m_fib1, pages = 1, scale = 0)
+simulationOutput <- simulateResiduals(fittedModel = m_fib1, plot = T)
+DHARMa::testDispersion(m_fib1)
+DHARMa::testZeroInflation(m_fib1)
+
+############################
+
+# When does fibrosis peak
+nd <- expand.grid(
+  Month_num  = seq(1, 13, by = 0.1),
+  hi_low_fib = levels(fish_sizes_mod$hi_low_fib),
+  Cohort     = "F0",  # hold constant
+  inf_yn     = mean(fish_sizes_mod$inf_yn, na.rm = TRUE),
+  Lake       = factor(levels(fish_sizes_mod$Lake)[1], 
+                      levels = levels(fish_sizes_mod$Lake))
+) %>%
+  mutate(
+    hi_low_fib = factor(hi_low_fib, levels = levels(fish_sizes_mod$hi_low_fib)),
+    Cohort     = factor(Cohort, levels = levels(fish_sizes_mod$Cohort))
+  )
+
+# predicted category probabilities
+P <- predict(m_fib1, newdata = nd, type = "response", exclude = "s(Lake)")
+
+# expected fibrosis score -- check your fib_int coding first
+k <- 1:5
+nd$E_fibrosis <- as.vector(P %*% k)
+
+# peak month per fibrosis group
+nd %>%
+  group_by(hi_low_fib) %>%
+  slice_max(E_fibrosis, n = 1, with_ties = FALSE) %>%
+  dplyr::select(hi_low_fib, peak_month = Month_num, peak_E = E_fibrosis)
+
+
+ggplot(nd, aes(x = Month_num, y = E_fibrosis, color = hi_low_fib)) +
+  geom_line(linewidth = 1) +
+  scale_color_manual(values = c("High" = "#1D9E75", "Low" = "grey50")) +
+  theme_classic()
+
+############################
+
+#Let's generate a table best model is the one that includes individual-level infection!
+tab_model(
+  m_fib1,
+  show.obs = F,
+  show.r2 = F,
+  show.ci = FALSE,
+  show.se = TRUE,
+  show.stat = TRUE,
+  show.icc = FALSE,
+  transform = NULL,
+  dv.labels = "Fibrosis score (ordinal GAM)",
+  pred.labels = c(
+    "Intercept",
+    "Cohort [F1]",
+    "Immune population [Low-fib]",
+    "Indiv. infection (0/1)",
+    "Indiv. infection (0/1) × Immune pop. [Low-fib]",
+    # threshold parameters and smooths will auto-label
+    "s(Month) [High-fib]",
+    "s(Month) [Low-fib]",
+    "Lake (RE)" ))
+
+```
+
+
+#TIMING OF TRANSMISSIBLE PARASITES
+
+Here, I want to demonstrate that transmissibility of worms (>0.05g) varies between lakes, time, and stages.Let's take the maximum worm weight in each fish and see if it is of transmissible stage.
+
+```{r MODELS: Transmissible parasites}
+
+#Do low-fibrosis lakes have more transmissible parasites than high-fibrosis lakes?
+trans_cor<- cohort_data_full %>%
+        mutate(trans_yn = ifelse(max_worm_wt >= 0.05, 1, 0)) %>%
+        select(Lake, Fibrosis, Total_Worms, max_worm_wt, hi_low_fib, trans_yn)
+
+kruskal.test(trans_yn ~ hi_low_fib, data = trans_cor)
+
+#Fisher's Exact Test
+table_df <- table(trans_cor$hi_low_fib, trans_cor$trans_yn)
+table_df
+
+fisher.test(table_df)
+
+######################### 
+# What about when do these transmissible parasites occur across time?
+######################### 
+
+trans_sum_lake <- trans %>%
+                  filter(!Cohort == "F2") %>%
+                  group_by(hi_low_fib, Lake, Month.adj, Season, Cohort, Month_num) %>%
+                  summarise(tot_trans_stages = sum(trans_worm_yn, na.rm = TRUE),
+                            .groups = "drop")
+
+nrow(trans_sum_lake)
+
+library(mgcv)
+m1_gamm <- gam(tot_trans_stages ~ hi_low_fib + Cohort +
+                 s(Month_num, by = hi_low_fib, bs = "tp", k = 4) +
+                 s(Lake, bs = "re"),
+               family = nb(),
+               data = trans_sum_lake,
+               method = "REML")
+
+summary(m1_gamm)
+simulationOutput <- simulateResiduals(fittedModel = m1_gamm, plot = T)
+DHARMa::testDispersion(m1_gamm)
+DHARMa::testZeroInflation(m1_gamm)
+
+plot(m1_gamm, pages = 1, scale = 0)
+
+
+```
+
+
+#TRANSMISSION TO BIRDS
+```{r CORRELATION: TRANMISSION TO BIRDS}
+
+cor_lab <- infbird %>%
+  group_by(hi_low_fib) %>%
+  summarise(
+    rho = cor(n_species, tot_trans_stages, method = "spearman", use = "complete.obs"), #pearson
+    p = cor.test(n_species, tot_trans_stages, method = "spearman")$p.value) 
+
+cor_lab
+
+```
+
+
