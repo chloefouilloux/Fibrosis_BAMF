@@ -63,3 +63,13 @@ Shine bright like a tapeworm. Hugz, C.
 | N_worms_dissected | count | Integer| Number of worms dissected from fish | — |
 | N_worms_weighed | count | Integer| Number of worms weighed from fish | — |
 | worm_wt_[1..xx]| Numeric | grams| Mass of individiual worm (the _# represents the weight of worm 1, worm2, and so on) | — |
+
+## Definitive host data (Piscivorous bird calls + loon)
+### Variable Definitions
+
+| Variable | Unit | Type | Description | Notes |
+|---------|------|------|-------------|-------|
+|month | — | Factor (12 levels) | 12 calendar months | Sampling started in August 2023 - July 2024 |
+|month_num | Numeric | Integer (1-12) | 12 calendar months | Numeric version for plotting purposes|
+| piscivore_calls| Count | Numeric | Number of calls from piscivorous birds | — |
+
