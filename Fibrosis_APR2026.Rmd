@@ -489,7 +489,6 @@ theme(   strip.text.x = element_text(size = 16,
 
 ################################### 
 
- Alternative coding options are as follows, **kmenoids** (PAM) or even, 
 
 ```{r Hi-Low Lake Clustering (not int.prev.)}
 
@@ -505,22 +504,37 @@ lake_summary <- fish_sizes %>%
                   
                   inf_prev     = mean(Total_Worms > 0, na.rm = TRUE),
                   mean_worm_intensity = mean(Total_Worms, na.rm = TRUE),
-                  ints_se =  sd(Total_Worms, na.rm = TRUE)/sqrt(sum(!is.na(Total_Worms))),
+                  mean_worm_burden = mean(total_worm_wt, na.rm = TRUE),
+                  burden_se =  sd(total_worm_wt, na.rm = TRUE)/sqrt(sum(!is.na(total_worm_wt))),
                   .groups = "drop" )
 
 lake_summary
 # Then feed fib_median or fib_mean into PAM
 #this is giving the highest weight to fibrosis
-w <- c(fib_median = 0.7,  inf_prev = 0.15, mean_worm_intensity = 0.15)
+
+w <- c(fib_mean = 0.7,  inf_prev = 0.15, mean_worm_burden = 0.15)
 
 #Daily is a dissimilarity matrix for mixed-type data
-diss <- daisy( lake_summary %>% select(fib_median,  inf_prev, mean_worm_intensity),
+diss <- daisy( lake_summary %>% select(fib_mean,  inf_prev, mean_worm_burden),
                metric = "gower", stand = TRUE, weights = as.numeric(w))
 diss
 
+##################
+### How many clusters should I choose for my PAM matrix?
+
+sil_widths <- sapply(2:5, function(k) {
+  pam(diss, k = k)$silinfo$avg.width
+})
+plot(2:5, sil_widths, type = "b", xlab = "k", ylab = "Average silhouette width")
+
+######################
+
 pam_fit <- pam(diss, k = 2)
 
+
 lake_summary %>% mutate(cluster = factor(pam_fit$clustering))
+
+###
 
 ###
 fish_sizes <- fish_sizes %>% mutate(hi_low_fib = case_when(
@@ -556,13 +570,13 @@ D. Definitive host abundance *counts)
 #FIBROSIS BY COHORT + HI/LOW FIBROSIS
 A1<- fish_sizes %>%
   filter(!Cohort %in% c(NA ,"F2")) %>%
-  ggplot(aes(x = Month.adj, colour =  hi_low_fib,
+  ggplot(aes(x = Month.adj, colour =  hi_low_fib, fill = hi_low_fib,
              y = Fibrosis)) +
   geom_jitter(width = 0.1, height = 0.08, 
              size = 3, alpha = 0.01) +
   stat_smooth(method = "gam", 
-              aes(group = hi_low_fib),
-              formula = y ~ s(x, bs = "tp", k = 4), #cr, cc
+              aes(group = hi_low_fib), alpha = 0.1,
+              formula = y ~ s(x, bs = "tp", k = 3), #cr, cc
               fullrange = T ) +
   labs(x = "", y = "Fibrosis Score (0-4)") +
   theme(strip.text = element_text(size = 18),
@@ -570,9 +584,10 @@ A1<- fish_sizes %>%
         axis.title.y = element_text(size = 22, 
                           angle =90, margin = margin(r = 15))) +
   theme(legend.position = "None")+
-  scale_colour_manual(
-  values = c("Low" = "darkgrey",
-             "High"  = "#1D9E75"))
+  scale_colour_manual( values = c("Low" = "darkgrey",
+                                "High"  = "#1D9E75")) +
+ scale_fill_manual( values = c("Low" = "darkgrey",
+                                "High"  = "#1D9E75")) 
 
 A1
 ####### Now incorporating cohort into it
@@ -791,14 +806,14 @@ B3
 A4<- trans %>%
   #   filter(hi_low_fib == "High") %>%
   ggplot(aes(x = Month.adj, colour =  hi_low_fib,
-             y = tot_trans_stages)) + 
+             y = log(tot_trans_stages+1))) + 
   geom_jitter(width = 0, height = 0, 
              size = 3, alpha = 0.01) +
   stat_smooth(method = "gam", 
               aes(group = hi_low_fib),
               formula = y ~ s(x, bs = "tp", k = 3), #cr, cc
               fullrange = T ) +
-  labs(x = "", y = "# transmissible stages") + #Size corrected infection burden
+  labs(x = "", y = "log(# transmissible stages +1)") + #Size corrected infection burden
   theme(strip.text = element_text(size = 18),
         axis.text.y = element_text(size = 18),
         axis.title.y = element_text(size = 22, 
@@ -965,7 +980,7 @@ infsp
 library(cowplot)
 library(patchwork)
 
-time<- A2/A1/A4/SP #A3
+time<- A2/A1/A4/SP #A2 here is frequentist, but we use bayesian one for paper
 age<-  B2/B1/B4/infsp #B3
 
 time
@@ -1021,9 +1036,10 @@ lake_summary1 <- fish_sizes %>% #no individual worm data on baby fish
                                                 NA_real_),  na.rm = TRUE) /
                                       sqrt(sum(!is.na(ifelse(max_worm_wt > 0,max_worm_wt,
                                                              NA_real_)))),
-              
+                  
+                 #infected prevalence over entire year
+                  inf_prev_year = mean(Total_Worms > 0, na.rm = TRUE),
                   .groups = "drop" )
-
 
 #####################################
  ### Integrated prevalence ####
@@ -1031,48 +1047,114 @@ lake_summary1 <- fish_sizes %>% #no individual worm data on baby fish
 
 yearly_df <- cohort_data_full %>%
               arrange(Lake, Month_num) %>%
-              group_by(Lake) %>%
+              group_by(Lake, hi_low_fib) %>%
               mutate(
                 dx = Month_num - lag(Month_num),
                 trap_area = dx * (inf_prev_lake_month + lag(inf_prev_lake_month)) / 2 , 
                 trap_area_trans = dx * (inf_prev_lake_month_trans +     
                                             lag(inf_prev_lake_month_trans)) / 2) %>%
-            ##################################################
              summarise( int_inf_prev = sum(trap_area, na.rm = TRUE))
-            
+##################################################
+   
+# Step 1: monthly prevalence per lake
+monthly_prev <- fish_sizes %>%
+                  group_by(Lake, Month.adj) %>%
+                  summarise(  inf_prev_month = mean(Total_Worms > 0, na.rm = TRUE),
+                    .groups = "drop")
+
+# Step 2: max monthly prevalence per lake
+max_monthly_prev <- monthly_prev %>%
+                    group_by(Lake) %>%
+                    summarise(  
+                      max_inf_prev = max(inf_prev_month, na.rm = TRUE),
+                      mean_inf_prev = mean(inf_prev_month, na.rm = TRUE),
+                      .groups = "drop"  )
+        
   
 lake_summary1 <- lake_summary1 %>% left_join(yearly_df, by = "Lake")
-
+lake_summary1 <- lake_summary1 %>% left_join(max_monthly_prev, by = "Lake")
 
 #With trans as welll
+vt<-
 lake_summary1 %>%
   ggplot() + #inf_prev
-              # vertical error bars (SE on infection prevalence)
-  geom_errorbarh(aes(xmin = mean_max_worm_inf - se_maxworm_inf,
-                            xmax = mean_max_worm_inf + se_maxworm_inf, 
-                           y = int_inf_prev, x = mean_max_worm_inf), width = 0) +
-          
-  geom_point(aes(y = int_inf_prev, x = mean_max_worm_inf), colour = "black", size = 3) +
-
   stat_smooth( aes(y = int_inf_prev, x = mean_max_worm_inf, group = 1), 
               method = "gam",
-              colour = "red",
-              formula = y ~ s(x, bs = "tp", k = 8)) +
-          labs(y = "Integrated infection prevalence", 
-               x = "Infection severity 
+              fill = "lightgrey", colour = "black",
+              formula = y ~ s(x, bs = "tp", k = 7)) +
+          labs(y = "Integrated infection prevalence
+(proportion × months)", 
+               x = "Parasite burden 
 (max. worm weight (g) per infected host)") +
         
-      geom_text(aes(label = Lake, y = int_inf_prev, x = mean_max_worm_inf), vjust = 2, 
-                hjust = -0.1, size = 3)  +
+      geom_text(aes(label = Lake, y = int_inf_prev, x = mean_max_worm_inf), vjust = -1.5, 
+                hjust = 0.85, size = 3)  +
+                # vertical error bars (SE on infection prevalence)
+  geom_errorbarh(aes(xmin = mean_max_worm_inf - se_maxworm_inf,
+                    xmax = mean_max_worm_inf + se_maxworm_inf, 
+                    y = int_inf_prev, x = mean_max_worm_inf), width = 0) +
+    geom_point(aes(y = int_inf_prev, x = mean_max_worm_inf, 
+                 colour = hi_low_fib),  size = 4) +
+  
+      scale_colour_manual(
+              values = c("Low" = "darkgrey","High"  = "#1D9E75"))+
       theme( axis.title.y = element_text(size = 22, angle = 90, margin = margin(r = 10)),
              axis.title.x = element_text(size = 22, margin = margin(5)),
             axis.text.y = element_text(size = 18),
             axis.text.x = element_text(size = 18),
             legend.position = "none"  )  
 
+vt
+
+ggsave("v_t.png", vt, height = 7, width = 7)
+ 
+###### Reviewer Response: Integrated infection prevalence vs. infection prevalence
+
+#See Hite et al. (2016) Ecology.
+#See Civitello et al. (2015) Journal of Animal Ecology
+ 
+#Integrated infection prev. vs. **MEAN* annual infeciton prevalence
+lake_summary1 %>%
+    ggplot(aes(y = mean_inf_prev, x = int_inf_prev, colour = hi_low_fib)) +
+        geom_point(size = 4) +
+        stat_cor(aes(group =1 ))+
+        stat_smooth(method = "glm", aes(group =1), colour = "black") +
+        scale_colour_manual(
+              values = c("Low" = "darkgrey","High"  = "#1D9E75"))+
+        labs(x = "Integrated infection prevalence
+(units of proportion × months)", 
+             y = "Mean annual infection prevalence
+(lake-level, proportion infected)") 
+
+
+#Integrated infection prev. vs. **MAX** annual infection prevalence
+lake_summary1 %>%
+    ggplot(aes(y = max_inf_prev, x = int_inf_prev, colour = hi_low_fib)) +
+        geom_point(size = 4) +
+        stat_cor(aes(group =1 ))+
+        stat_smooth(method = "glm", aes(group =1), colour = "black") +
+        scale_colour_manual(
+              values = c("Low" = "darkgrey","High"  = "#1D9E75"))+
+        labs(x = "Integrated infection prevalence
+(units of proportion × months)", 
+             y = "Maximum annual infection prevalence
+(lake-level, proportion infected)") 
+
+
+        
+###
+cor_lab <- lake_summary1%>%
+  summarise(
+    rho = cor(mean_inf_prev, int_inf_prev, method = "pearson", use = "complete.obs"), 
+    #pearson, spearman
+    p = cor.test(mean_inf_prev, int_inf_prev,  method = "pearson")$p.value) 
+
+cor_lab
+
+#"This index of epidemic size is highly correlated with another index, maximum infection prevalence (R = 0·914, P < 0·00151), which ranged from 18 to 42% in these lakes in from July 2023 to July 2024".
+######## 
 
 ```
-
 
 ################################### 
 # Models
@@ -1094,7 +1176,7 @@ mu = the conditional prediction -- expected burden given the fish is infected
 
 cohort_data_mod <- cohort_data_full %>% #includes babies (but not their fibrosis)
                   filter(!Cohort == "F2") %>%
-                 mutate(Cohort = droplevels(Cohort)) 
+                  mutate(Cohort = droplevels(Cohort)) 
 
 ####################################
 ######### COMPLEX SPLINES WITH A TP CURVE ##############
